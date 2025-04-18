@@ -139,14 +139,14 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             self.num_emitted_tokens += emitted_token_num.sum() + batch_size
             self.num_draft_tokens += batch_size * k
         else:
-            accepted, recovered_token_ids = (
+            accepted, recovered_token_ids, pos_idx = (
                 self._batch_modified_rejection_sampling(
-                    target_with_bonus_probs[:, :-1],
-                    draft_probs,
-                    draft_token_ids,
+                    target_with_bonus_probs[:, :-1], # (batch_size, K, vocab_size) unique: 0 or 1
+                    draft_probs, # (batch_size, K, vocab_size) unique: 0 or 1
+                    draft_token_ids, #(batch_size, K)
                     seeded_seqs,
                 ))
-
+            #logger.info(f'accepted as {accepted}')
             output_token_ids = self._create_output(
                 accepted,
                 recovered_token_ids,
@@ -154,7 +154,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                 bonus_token_ids,
             )
 
-        return output_token_ids
+        return output_token_ids, pos_idx
 
     def _batch_modified_rejection_sampling(
         self,
@@ -177,8 +177,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         batch_size, k, vocab_size = draft_probs.shape
 
         # shape [batch_size, k]
-        accepted = self._get_accepted(target_probs, draft_probs,
-                                      draft_token_ids, seeded_seqs)
+        accepted, pos_idx = self._get_accepted(target_probs, draft_probs,
+                                      draft_token_ids, seeded_seqs) 
 
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
@@ -191,7 +191,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             seeded_seqs=seeded_seqs or {},
         ).reshape(batch_size, k)
 
-        return accepted, recovered_token_ids
+        return accepted, recovered_token_ids, pos_idx
 
     def _create_uniform_samples(self,
                                 seeded_seqs: Optional[Dict[int,
@@ -292,13 +292,26 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
                                                     k - 1, target_probs.device)
-
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
             torch.full((1, ), 1, device=target_probs.device))
         accepted = uniform_rand < capped_ratio
 
-        return accepted
+        ## 对特殊词进行处理，特殊词的概率为-1
+        ## 特殊词的扩展词接受情况和特殊词的第一个token保持一致
+        ## 即特殊词扩展要么都接受，要么都不接受。
+        pos_idx = torch.full((accepted.size(0), 1), -1, dtype=torch.long, device=target_probs.device)
+        for i in range(accepted.size(0)):
+            row = selected_draft_probs[i]
+            first_invalid = (row < 0.0).nonzero(as_tuple=True)[0]
+            if len(first_invalid) > 0:
+                # logger.info(f"** ori accepted: {accepted} with selected_draft_probs: {selected_draft_probs}")
+                pos = first_invalid[0].item()
+                assert pos > 0
+                accepted[i, pos:] = accepted[i, pos - 1]
+                pos_idx[i] = pos - len(row) - 1 # 特殊词第一个token, 倒着数 -1表示没有特殊词
+                # logger.info(f"** modify accepted: {accepted}, pos_idx: {pos_idx}")
+        return accepted, pos_idx
 
     def _get_recovered_probs(
             self,

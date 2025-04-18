@@ -94,12 +94,27 @@ class SpecDecodeBaseSampler(nn.Module):
         Returns:
             A tensor containing the accepted token ids. The shape of the 
             tensor is [batch_size, k + num_bonus_tokens]
+
+            accepted 决定哪些 token 被接受：
+            False 表示拒绝，True 表示接受。
+            limits 找到第一个被拒绝的位置：
+            本例是 0（第一个 False）。
+            accepted_mask 和 after_false_mask 生成掩码：
+            accepted_mask 标记所有被接受的 token（本例没有）。
+            after_false_mask 标记第一个被拒绝的 token（位置 0）。
+            填充 output：
+            被接受的 token 用 draft_token_ids，否则用 -1。
+            第一个被拒绝的 token 用 substitute_token_ids 替换（17714）。
+            bonus_token 处理：
+            如果所有 token 都被接受，追加 bonus_token_ids（本例没有）。
+            返回最终序列：
+            被拒绝的位置用 -1 填充，表示无效 token。
         """
         batch_size, k = substitute_token_ids.shape
         bonus_token_ids = bonus_token_ids.squeeze(-1)
         # Determine the index of the first False value for each row.
-        limits = (accepted == 0).max(1).indices
-        limits[~(accepted == 0).any(1)] = k
+        limits = (accepted == 0).max(1).indices   #第一个被拒绝的位置
+        limits[~(accepted == 0).any(1)] = k       #全部 accepted 的，设为 k
 
         # Create masks using the indices.
         indices = torch.arange(k, device=accepted.device).unsqueeze(0)

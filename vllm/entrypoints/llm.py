@@ -187,6 +187,7 @@ class LLM:
         task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
+        speculative_append_slots_len: int = 0,
         **kwargs,
     ) -> None:
         '''
@@ -241,6 +242,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
+            speculative_append_slots_len=speculative_append_slots_len,
             **kwargs,
         )
 

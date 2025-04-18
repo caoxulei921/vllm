@@ -17,6 +17,8 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from math import ceil
+
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -83,7 +85,13 @@ class EAGLE(nn.Module):
 
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
-                            bias=getattr(self.config, "eagle_fc_bias", False))
+                            bias=getattr(self.config, "eagle_fc_bias", True))
+        
+        
+        TRUE_EXPAND_VOCAB_SIZE = 4555
+        TRUE_ORIGIN_VOCAB_SIZE = 151665
+        ADJUSTED_EXPAND_IDS_SIZE = ceil(TRUE_EXPAND_VOCAB_SIZE / 256) * 256
+        self.expand_vocab_size = ADJUSTED_EXPAND_IDS_SIZE
 
         # Modify layer normalization and residual connections as suggested
         # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
@@ -117,6 +125,13 @@ class EAGLE(nn.Module):
             org_num_embeddings=self.truncated_vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
         )
+        
+        # self.lm_head_expand = ParallelLMHead(
+        #     self.expand_vocab_size,
+        #     config.hidden_size,
+        #     org_num_embeddings=self.expand_vocab_size,
+        #     padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+        # )
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
@@ -205,6 +220,8 @@ class EAGLE(nn.Module):
         # checkpoint to vLLM compatible version: https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d
         model_weights = {}
         for name, loaded_weight in weights:
+            if name == "weight":
+                continue
             if name == "token_map":
                 if self.config.truncated_vocab_size < self.config.vocab_size:
                     self.token_map = nn.Parameter(loaded_weight,
@@ -232,7 +249,7 @@ class EAGLE(nn.Module):
             elif name.startswith("model.lm_head.") or name.startswith(
                     "model.model."):
                 model_weights[name.split("model.", 1)[-1]] = loaded_weight
-            elif name.startswith("lm_head.") or name.startswith("model."):
+            elif name.startswith("lm_head") or name.startswith("model."):
                 model_weights[name] = loaded_weight
             else:
                 model_weights[f"model.{name}"] = loaded_weight
@@ -244,6 +261,14 @@ class EAGLE(nn.Module):
                 lm_head_weight.shape[0] > self.token_map.shape[0]:
 
                 lm_head_weight = lm_head_weight[self.token_map]
+                
+        # if "lm_head_expand.weight" in model_weights:
+        #     lm_head_expand_weight = model_weights.pop("lm_head_expand.weight")
+
+        #     if self.token_map is not None and\
+        #         lm_head_expand_weight.shape[0] > self.token_map.shape[0]:
+
+        #         lm_head_expand_weight = lm_head_expand_weight[self.token_map]
 
         else:
             # NOTE(Shangming): initialize the placeholder for lm_head weight.
@@ -256,5 +281,9 @@ class EAGLE(nn.Module):
         weight_loader = getattr(self.lm_head.weight, "weight_loader",
                                 default_weight_loader)
         weight_loader(self.lm_head.weight, lm_head_weight)
+        
+        # weight_loader = getattr(self.lm_head_expand.weight, "weight_loader",
+        #                         default_weight_loader)
+        # weight_loader(self.lm_head_expand.weight, lm_head_expand_weight)
 
         self.model.load_weights(model_weights.items())

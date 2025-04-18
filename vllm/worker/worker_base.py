@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 import cloudpickle
 import torch
 import torch.nn as nn
-
+import json
 from vllm.config import (ObservabilityConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
@@ -54,6 +54,10 @@ class WorkerBase:
         self.compilation_config = vllm_config.compilation_config
         from vllm.platforms import current_platform
         self.current_platform = current_platform
+        self.src_ids = None
+        self.tgt_ids = None
+
+
 
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
@@ -128,7 +132,31 @@ class WorkerBase:
     def vocab_size(self) -> int:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
-
+    
+    def load_vocab_trans_dict(
+        self,
+        dict_path            
+    ) -> None:
+        try:
+            with open(dict_path, 'r', encoding='utf-8') as f:
+                self.rule_dict = json.load(f)
+        except FileNotFoundError:
+            print(f"file not exist: {dict_path}")
+        except json.JSONDecodeError:
+            print("file format error: {dict_path}")
+        # 2. 遍历规则并生成 src_ids 和 tgt_ids
+        src_ids = []
+        tgt_ids = []
+        for tgt, src_and_others in self.rule_dict.items():
+            tgt = int(tgt)
+            if not src_and_others:  # 跳过空list
+                continue
+            src = int(src_and_others[0])  # 取第一个作为 src
+            src_ids.append(src)
+            tgt_ids.append(tgt)
+        # 3. 转为 tensor 并搬到GPU
+        self.src_ids = torch.tensor(src_ids, dtype=torch.int, device=self.device)
+        self.tgt_ids = torch.tensor(tgt_ids, dtype=torch.int, device=self.device)
 
 class DelegateWorkerBase(WorkerBase):
     """
@@ -382,6 +410,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+    
+
 
     def execute_model(
         self,
@@ -416,6 +446,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     and self.observability_config.collect_model_execute_time):
                 orig_model_execute_time = intermediate_tensors.tensors.get(
                     "model_execute_time", torch.tensor(0)).item()
+
 
         output = self.model_runner.execute_model(
             model_input=model_input,
@@ -642,3 +673,4 @@ def extract_previous_hidden_states(
             .hidden_states
 
     return output
+

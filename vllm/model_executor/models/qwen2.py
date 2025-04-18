@@ -389,6 +389,16 @@ class Qwen2Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
+                # if name.startswith("layers") and name.endswith(".weight"):
+                #     # replace the .weight with .qweight
+                #     name = name.replace(".weight", ".qweight")
+                #     param = params_dict[name]
+                #     weight_loader = param.weight_loader
+                #     weight_loader(param, loaded_weight, shard_id)
+                # else: 
+                #     param = params_dict[name]
+                #     weight_loader = param.weight_loader
+                #     weight_loader(param, loaded_weight, shard_id)
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -403,6 +413,28 @@ class Qwen2Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
+                # if name not in params_dict:
+                #     if name.startswith("layers") and name.endswith(".weight"):
+                #         name = name.replace(".weight", ".qweight")
+                #         param = params_dict[name]
+                #         weight_loader = getattr(param, "weight_loader",
+                #                         default_weight_loader)
+                #         weight_loader(param, loaded_weight)
+                #     else:
+                #         if name == "frozen_embed.weight":
+                #             param = params_dict["embed_tokens.weight"]
+                #             weight_loader = getattr(param, "weight_loader",
+                #                         default_weight_loader)
+                #             weight_loader(param, loaded_weight)
+                #         else:
+                #             print(f"missing param {name}")
+                # else:
+                #     if name == "embed_tokens_expand.weight":
+                #         print(f"embed_tokens_expand.weight is loaded")
+                #     param = params_dict[name]
+                #     weight_loader = getattr(param, "weight_loader",
+                #                         default_weight_loader)
+                #     weight_loader(param, loaded_weight)
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

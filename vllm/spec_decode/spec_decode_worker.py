@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
 import torch.nn as nn
-
+import math 
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
                                                get_tp_group,
@@ -340,6 +340,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
+        self.special_pos_idx =  torch.tensor([-1], dtype=torch.long)
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -360,9 +361,16 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     weight.data,
                     dim=0,
             )
-
+            
+            if self.proposer_worker.worker.model_runner.model_runner.model.lm_head.weight.shape[0] != target_lm_head_weight.shape[0]:
+                from safetensors.torch import load_file
+                import os
+                target_lm_head_weight = load_file(os.path.join(self.proposer_worker.worker.speculative_config.model, "lm_head.safetensors"))['lm_head']
             self.proposer_worker.maybe_load_lm_head_weight(
                 target_lm_head_weight)
+        
+        self.proposer_worker.load_vocab_trans_dict(self.proposer_worker.worker.speculative_config.vocab_trans_dict)
+        
 
         self._metrics.init_tensors(self.rank, device_type=self.device)
         if model_parallel_is_initialized():
@@ -384,7 +392,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         self.scorer = scorer_cls(scorer_worker=self.scorer_worker,
                                  device=self.device,
-                                 vocab_size=self._vocab_size)
+                                 vocab_size=self.scorer_worker.vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -469,7 +477,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # execution loop.
             broadcast_tensor_dict({}, src=0)
             return []
+        
 
+    
         self._track_finished_requests(execute_model_req)
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
@@ -477,6 +487,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         all_prompt = True
         atleast_one_prompt = False
         all_zero_spec_tokens = True
+        self.second_last_token_hidden_states = None
         for sgm in execute_model_req.seq_group_metadata_list:
             all_prompt = all_prompt and sgm.is_prompt
             atleast_one_prompt = atleast_one_prompt or sgm.is_prompt
@@ -660,6 +671,34 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         return [SamplerOutput(outputs=completion_seq_group_output_list)]
 
+
+    def modify_prompt_token_from_execute_model_req(
+        self,
+        execute_model_req: ExecuteModelRequest
+    ) -> List[int]:
+        """
+        从 ExecuteModelRequest 中删除指定的 token
+        
+        Args:
+            execute_model_req: 要修改的 ExecuteModelRequest 实例
+        Returns:
+            修改后的 ExecuteModelRequest 实例的长度
+        """
+        # 遍历每个 sequence group metadata
+        prompt_new_len = []
+        for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+            # 创建新的 seq_data 字典
+            # 遍历每个 sequence 的 data
+            for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                # 获取当前的 token IDs
+                prompt_token_ids = seq_data.get_prompt_token_ids()
+                new_prompt_token_ids = [105043, 100165, 100165]
+                # 使用 from_seqs 创建新的 SequenceData 实例
+                seq_data.modify_prompt_token_ids(new_prompt_token_ids)
+                prompt_new_len.append(len(new_prompt_token_ids))
+            seq_group_metadata.token_chunk_size =  len(new_prompt_token_ids)
+        return prompt_new_len
+
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
                      skip_proposer: bool) -> List[SamplerOutput]:
@@ -669,11 +708,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-
+        
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
-
         # Store hidden states from target model execution, BxD.
         hidden_states = sampler_output.hidden_states
         if hidden_states is not None:
@@ -693,6 +731,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     hidden_states, seq_group_meta_with_hidden)
             elif self.previous_hidden_states and len(
                     seq_group_meta_with_hidden):
+                self.previous_hidden_states.second_last_token_hidden_states = None
                 self.previous_hidden_states.update(hidden_states,
                                                    seq_group_meta_with_hidden)
 
@@ -700,13 +739,19 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # We prepare the prefill hidden states here so that there no
             # additional complexity in worker for spec_decode vs non_spec_decode
             # flow and execute_model doesn't need additional modifications.
+
+            
+            # cxl: 这里修改输入以及处理对应的previous_hidden_states，previous_hidden_states的shape和promote长度一致
+            # prompt_new_len = self.modify_prompt_token_from_execute_model_req(execute_model_req)
+            
+            # previous_hidden_states shape [, 5120]
             execute_model_req.previous_hidden_states = \
                 prepare_prefill_hidden_states(
                     sampler_output.prefill_hidden_states)
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
-                self.proposer_worker.execute_model(execute_model_req)
-
+                sampler_output_eagle = self.proposer_worker.execute_model(execute_model_req)
+            
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
                                     if self._disable_logprobs else
@@ -777,18 +822,23 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Pass last hidden states from target model to proposer
         execute_model_req.previous_hidden_states = self.previous_hidden_states
         self.previous_hidden_states = None
-
+               
         with Timer() as proposal_timer:
             # Generate proposals using draft worker.
             proposals = self.proposer_worker.get_spec_proposals(
-                execute_model_req, self._seq_with_bonus_token_in_last_step)
-
+                execute_model_req, self._seq_with_bonus_token_in_last_step, self.special_pos_idx)
+            
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
 
         execute_model_req.previous_hidden_states = None
+
+        ##eagle 模型输出长度不定长，动态更新
+        execute_model_req.num_lookahead_slots = proposals.proposal_token_ids.shape[1]
+        proposals.proposal_lens[0] = proposals.proposal_token_ids.shape[1]
+
 
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(
@@ -816,7 +866,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             self.proposer_worker.execute_model(prefill_req)
 
         with Timer() as verification_timer:
-            accepted_token_ids, target_logprobs = self._verify_tokens(
+            accepted_token_ids, target_logprobs, self.special_pos_idx = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
 
@@ -847,7 +897,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         Returns a tuple of Tensors, one for the accepted token ids and one for
         the logprobs according to the scoring model.
         """
-        proposal_lens_list = proposals.proposal_lens.tolist()
+        proposal_lens_list = proposals.proposal_lens.tolist()  # equal K
 
         # vLLM currently only supports proposal lens equal to zero or the batch
         # proposal len. This adds some complexity (splitting the batch into spec
@@ -858,7 +908,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         original_indices = spec_indices + non_spec_indices
 
         # Get probabilities of target model, including bonus tokens.
-        proposal_verifier_probs = proposal_scores.probs[spec_indices]
+        proposal_verifier_probs = proposal_scores.probs[spec_indices] # ([1, 6, 152064]) (batch_size, K+1, vocab_size)
 
         # Get non-speculative sampled tokens from target model.
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
@@ -867,7 +917,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
 
         # Get probabilities according to proposal method.
-        proposal_probs = proposals.proposal_probs[spec_indices]
+        proposal_probs = proposals.proposal_probs[spec_indices] # ([1, 6, 152064]) (batch_size, K, vocab_size)
 
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
@@ -882,13 +932,16 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 if sgm.sampling_params.seed is not None
             }
 
-        accepted_token_ids = self.spec_decode_sampler(
+        accepted_token_ids, special_pos_idx = self.spec_decode_sampler(
             target_with_bonus_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
             **sampler_extra_kwargs,
         )
+    
+
+
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
@@ -922,13 +975,22 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 terminal_metadata)
             index = accepted_index[:, None, None].expand(-1, 1,
                                                          hs_size)  # b x 1 x d
-            second_last_token_hidden_states = hidden_states[:, -2]  # b x d
+            ## 借用这个变量来存储特殊词的首token的hidden_state
+            ## 只检查了单batch，多batch逻辑还有问题需要重新开发，second_last_token_hidden_states需要解决到-1的变长
+            if hidden_states.shape[0] == 1:
+                second_last_token_hidden_states = hidden_states[:, special_pos_idx.item()-1: -1]  # b x d 
+            else:
+                T = hidden_states.shape[1]
+                pos = special_pos_idx + T  # [-2] -> 2, [-3] -> 1, [-1] -> 3 T=4
+                special_index = pos.unsqueeze(-1).expand(-1, 1, hs_size)
+                second_last_token_hidden_states = hidden_states.gather(1, special_index).squeeze(1)
+            
             hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
             # Store hidden states from target model for subsequent decode step
             self.previous_hidden_states = HiddenStates(
                 hidden_states, terminal_metadata,
                 second_last_token_hidden_states)
-        return accepted_token_ids, logprobs
+        return accepted_token_ids, logprobs, special_pos_idx
 
     def _create_output_sampler_list(
         self,
@@ -1255,7 +1317,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             worker.vocab_size
             for worker in [self.proposer_worker, self.scorer_worker]
         ]
-        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
+        # assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
         return vocab_sizes[0]
 
     @property
@@ -1322,3 +1384,20 @@ def prepare_prefill_hidden_states(
     # align n-1th hidden state with nth token.
     return HiddenStates(prefill_hidden_states.roll(
         shifts=1, dims=0)) if prefill_hidden_states is not None else None
+
+
+def prepare_prefill_hidden_states_new(
+        prefill_hidden_states: torch.Tensor,
+        prompt_new_len: List[int]) -> HiddenStates:
+    # For prefill step in proposer, we run the model for N-1 tokens
+    # because Nth token will be processed in the first decode step. For
+    # N-1 tokens, the input should be 0:N-1 hidden states which should
+    # be concatanated with 1:N token (since output of scorer has to be
+    # the input for proposer). Therefore, we shift the hidden states to
+    # align n-1th hidden state with nth token.
+    # 需要重新修改的逻辑，用mask取出合并后真实的隐层
+
+    return HiddenStates(prefill_hidden_states[:prompt_new_len[0]].roll(
+        shifts=1, dims=0)) if prefill_hidden_states is not None else None
+
+

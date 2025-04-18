@@ -254,6 +254,7 @@ class EngineArgs:
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
+    speculative_append_slots_len: int = 0
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -1293,6 +1294,7 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            speculative_append_slots_len=self.speculative_append_slots_len
         )
 
         lora_config = LoRAConfig(

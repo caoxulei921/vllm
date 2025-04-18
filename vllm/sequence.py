@@ -390,6 +390,34 @@ class SequenceData(msgspec.Struct,
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()})")
+    
+    def modify_prompt_token_ids(self, new_prompt_token_ids: GenericSequence[int]) -> None:
+        """修改 prompt token IDs 并更新相关状态
+        Args:
+            new_prompt_token_ids: 新的 prompt token ID 序列
+            
+        注意:
+            - 会重置计算状态(_num_computed_tokens)
+            - 会更新所有缓存的 token 列表
+            - 保持输出 token 不变
+        """
+        # 将新的 prompt token IDs 转换为 array 类型
+        self._prompt_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, new_prompt_token_ids)
+        # self.token_chunk_size = len(new_prompt_token_ids)
+        # 更新 prompt token IDs 元组缓存
+        self._prompt_token_ids_tuple = tuple(self._prompt_token_ids)
+        # 更新所有 token 的缓存列表
+        self._update_cached_all_tokens()
+        # 重置计算状态，因为 prompt 发生了变化
+        self._num_computed_tokens = 0
+        self._num_cached_tokens = 0
+        self._stage = SequenceStage.PREFILL
+        # 清空新追加的 token 列表
+        self._new_appended_tokens = []
+        # mrope_position_delta 可能需要重新计算
+        self._mrope_position_delta = None
+        
+
 
 
 class Sequence:
@@ -1282,17 +1310,26 @@ class HiddenStates(msgspec.Struct, array_like=True,
         if self.second_last_token_hidden_states is None \
             or not seq_with_bonus_token_in_last_step:
             return
-
+        
+        # 只考虑了单batch，多batch暂未考虑
         index = []
         for seq_id in self._seq_ids:
             i = self._seq_ids.index(seq_id)
             if seq_id in seq_with_bonus_token_in_last_step:
-                index.append(i + len(self._seq_ids))
+                if self.second_last_token_hidden_states.dim() == 2:
+                    index.append(i + len(self._seq_ids))
+                elif self.second_last_token_hidden_states.dim() == 3:
+                    second_last_token_hidden_states_len = self.second_last_token_hidden_states.shape[1]
+                    for j in range(second_last_token_hidden_states_len):
+                        index.append(i + j + len(self._seq_ids))
             index.append(i)
 
-        self.hidden_states = torch.cat(
-            [self.hidden_states, self.second_last_token_hidden_states])[index]
-
+        if self.second_last_token_hidden_states.dim() == 2:
+            self.hidden_states = torch.cat(
+                [self.hidden_states, self.second_last_token_hidden_states])[index]
+        elif self.second_last_token_hidden_states.dim() == 3:   
+            self.hidden_states = torch.cat(
+                [self.hidden_states, self.second_last_token_hidden_states.squeeze(0)])[index]
 
 class ExecuteModelRequest(
         msgspec.Struct,

@@ -500,6 +500,7 @@ class FlashAttentionMetadataBuilder(
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
+        
         prefix_cache_hit = any([
             inter_data.prefix_cache_hit
             for inter_data in self.input_builder.inter_data_list
@@ -557,7 +558,6 @@ class FlashAttentionMetadataBuilder(
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
         }
-
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,

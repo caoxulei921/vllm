@@ -64,6 +64,7 @@ def _compute_slot_mapping_python(slot_mapping: List[int],
                                  range_end: int, block_size: int):
     for i in range(range_start, range_end):
         block_number = block_table[i // block_size]
+        #block_number = i // block_size
         block_offset = i % block_size
         slot = block_number * block_size + block_offset
         slot_mapping.append(slot)

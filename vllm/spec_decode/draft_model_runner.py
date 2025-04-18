@@ -3,9 +3,11 @@
 from typing import List, Optional
 
 import torch
-
+import math
+import json
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
+import copy
 
 try:
     try:
@@ -53,6 +55,35 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
+        self.load_vocab_trans_dict(dict_path = "/data/framework_vllm/zch/dict.json")
+
+    def load_vocab_trans_dict(
+        self,
+        dict_path            
+    ) -> None:
+        try:
+            with open(dict_path, 'r', encoding='utf-8') as f:
+                self.rule_dict = json.load(f)
+        except FileNotFoundError:
+            print(f"file not exist: {dict_path}")
+        except json.JSONDecodeError:
+            print("file format error: {dict_path}")
+        # 2. 遍历规则并生成 src_ids 和 tgt_ids
+        src_ids = []
+        tgt_ids = []
+        for tgt, src_and_others in self.rule_dict.items():
+            tgt = int(tgt)
+            if not src_and_others:  # 跳过空list
+                continue
+            #src = int(src_and_others[0])  # 取第一个作为 src
+            src_ids.append(src_and_others)
+            tgt_ids.append(tgt)
+        # 3. 转为 tensor 并搬到GPU
+        self.src_ids = torch.tensor(
+            [x + [-1] * (max(len(x) for x in src_ids) - len(x)) for x in src_ids],
+            dtype=torch.int, device=self.device)
+        self.tgt_ids = torch.tensor(tgt_ids, dtype=torch.int, device=self.device)
+
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
@@ -87,10 +118,13 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-
+        if debug_advance_input:
+            print ("** Before advance_step")
+            print("    slot_mapping: %s", attn_metadata.slot_mapping)
+            print("    block_tables: %s", attn_metadata.block_tables)
+            print ("\n")
         attn_metadata.advance_step(model_input, sampled_token_ids,
                                    self.block_size, num_seqs, num_queries)
-
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
         self._update_sampling_metadata(sampling_metadata, num_seqs,
@@ -116,17 +150,17 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         new_model_input.sampling_metadata.reuse_sampling_tensors = True
 
         if debug_advance_input:
-            logger.debug("NEW INPUT: ")
-            logger.debug("  input_tokens = %s", new_model_input.input_tokens)
-            logger.debug("  input_positions = %s",
+            print("NEW INPUT: ")
+            print("  input_tokens = %s", new_model_input.input_tokens)
+            print("  input_positions = %s",
                          new_model_input.input_positions)
-            logger.debug("  seq_lens = %d", new_model_input.seq_lens)
-            logger.debug("  query_lens = %d", new_model_input.query_lens)
-            logger.debug("  attn_metadata:")
-            logger.debug("    seq_lens_tensor: %s",
+            print("  seq_lens = %d", new_model_input.seq_lens)
+            print("  query_lens = %d", new_model_input.query_lens)
+            print("  attn_metadata:")
+            print("    seq_lens_tensor: %s",
                          attn_metadata.seq_lens_tensor)
-            logger.debug("    slot_mapping: %s", attn_metadata.slot_mapping)
-            logger.debug("    block_tables: %s", attn_metadata.block_tables)
+            print("    slot_mapping: %s", attn_metadata.slot_mapping)
+            print("    block_tables: %s", attn_metadata.block_tables)
 
         return new_model_input
 
@@ -186,6 +220,14 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # advance_step, which runs prepare_inputs on CPU and for each spec
         # iteration invokes this function only once
         # (Look at multi-step-worker code)
+        if debug_advance_input:
+            print("execute_model INPUT: ")
+            print("  input_tokens = %s", model_input.input_tokens)
+            print("  input_positions = %s",
+                            model_input.input_positions)
+            print("    slot_mapping: %s", model_input.attn_metadata.slot_mapping)
+            print("    block_tables: %s", model_input.attn_metadata.block_tables)
+
         is_fallback = num_steps == 1
         if not is_fallback:
             # Since we do not broadcast data inside execute_model anymore,
@@ -263,6 +305,26 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             hidden_states = previous_hidden_states
 
         outputs: List[SamplerOutput] = []
+
+        if not hasattr(self, 'PAD_ORIGIN_VOCAB_SIZE'):
+            if hasattr(self.model.config, 'PAD_ORIGIN_VOCAB_SIZE') and \
+                hasattr(self.model.config, 'TRUE_EXPAND_VOCAB_SIZE') and \
+                hasattr(self.model.config, 'TRUE_ORIGIN_VOCAB_SIZE'):
+                self.PAD_ORIGIN_VOCAB_SIZE = self.model.config.PAD_ORIGIN_VOCAB_SIZE
+                self.TRUE_EXPAND_VOCAB_SIZE = self.model.config.TRUE_EXPAND_VOCAB_SIZE
+                self.TRUE_ORIGIN_VOCAB_SIZE = self.model.config.TRUE_ORIGIN_VOCAB_SIZE
+                self.ADJUSTED_EXPAND_IDS_SIZE = math.ceil(self.TRUE_EXPAND_VOCAB_SIZE / 256) * 256
+                self.PAD_EXPAND_VOCAB_SIZE = self.PAD_ORIGIN_VOCAB_SIZE + self.ADJUSTED_EXPAND_IDS_SIZE
+        
+        if model_input.is_prompt: ##如果是prefill则退化成原始方法
+            kwargs["is_prompt"] = True
+        else:
+            kwargs["is_prompt"] = False
+            kwargs["src_ids"] = self.src_ids
+            kwargs["tgt_ids"] = self.tgt_ids
+
+
+
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
@@ -288,17 +350,24 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                     **model_execute_kwargs,
                 )
 
-            # Compute the logits.
+            #Compute the logits.
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata,
                                                **compute_logits_kwargs)
+
+
+            logits_part1 = logits[:, :self.PAD_ORIGIN_VOCAB_SIZE]       # 原始词表部分
+            logits_part2 = logits[:, self.PAD_ORIGIN_VOCAB_SIZE:]       # padding / 扩展词表部分
+            
             if not self.is_driver_worker:
                 return []
             # Sample the next token.
             output = self.model.sample(
-                logits=logits,
+                logits=logits_part1,
                 sampling_metadata=model_input.sampling_metadata,
             )
+
+
             outputs.append(output)
 
             if self.return_hidden_states and is_fallback:
@@ -317,19 +386,61 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 assert num_tokens_per_seq == 1
                 count = 0
                 for i in range(nums_seqs):
-                    bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
-                        count]
-                    if i != bonus_seq_idx:
-                        # The following might cause a cpu->gpu sync
-                        # However, the performance impact is negligible as we
-                        # benchmarked on H100.
-                        output.sampled_token_ids[
-                            i, :] = model_input.input_tokens[bonus_seq_idx]
-                    else:
-                        count += 1
+                    if nums_seqs >= 3:
+                        ##正常情况只有特殊词被接受后，下一轮才会进入这个逻辑nums_seqs == 特殊词长度 + 1（bounds）
+                        bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
+                            count]
+                        if debug_advance_input:
+                            print (f"** ori sampled_token_ids: {output.sampled_token_ids}")
+                        if i != bonus_seq_idx:
+                            output.sampled_token_ids[
+                                i, :] = model_input.input_tokens[i+1]
+                        else:
+                            count += 1
+                        if debug_advance_input:
+                            print (f"** final sampled_token_ids: {output.sampled_token_ids}")
+
+                    elif nums_seqs <= 2:
+                        ##非特殊词包含bounds会进入这个逻辑
+                        bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
+                            count]
+                        if i != bonus_seq_idx:
+                            # The following might cause a cpu->gpu sync
+                            # However, the performance impact is negligible as we
+                            # benchmarked on H100.
+                            output.sampled_token_ids[
+                                i, :] = model_input.input_tokens[bonus_seq_idx]
+                        else:
+                            count += 1
+
+            if kwargs.get("is_prompt") is True:
+                pass  ## prefill阶段无改造
+            elif kwargs.get("is_prompt") is False:
+                activate_ids = logits_part2[-1].argmax(-1).item()
+                if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
+                    replace_token_ids = self.src_ids[activate_ids]
+                    replace_token_ids = replace_token_ids.masked_select(replace_token_ids != -1)
+                    if debug_advance_input:
+                        print (f"** Step: {step}, Enter Special token ids:{activate_ids}  replace with: {replace_token_ids}"  )
+                    for i in range(replace_token_ids.shape[0]):
+                        if i == 0:
+                            output.sampled_token_ids[bonus_seq_idx][0] = replace_token_ids[0]
+                            #model_input = self._gpu_advance_step(model_input, outputs[-1])
+                            output_special = copy.deepcopy(output)
+                            output_special.logprobs.fill_(-1)
+                            output_special.sampled_token_probs.fill_(-1)
+                        else:
+                            output_special.sampled_token_ids = torch.cat([output_special.sampled_token_ids[1:], replace_token_ids[i].reshape(1, 1)], dim=0)
+                            outputs.append(output_special)
+                            if i < replace_token_ids.shape[0] - 1:
+                                output_special = copy.deepcopy(output_special)
+                                #model_input = self._gpu_advance_step(model_input, outputs[-1])
+                    return outputs    ## 早停
 
             # Prepare inputs for the next step
             if step != num_steps - 1:
+                if debug_advance_input:
+                    print (f"** Step: {step}, Enter gpu advance step")
                 model_input = self._gpu_advance_step(model_input, outputs[-1])
 
         return outputs
