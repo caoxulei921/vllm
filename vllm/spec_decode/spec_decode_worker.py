@@ -660,6 +660,33 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         return [SamplerOutput(outputs=completion_seq_group_output_list)]
 
+
+    def modify_prompt_token_from_execute_model_req(
+        self,
+        execute_model_req: ExecuteModelRequest
+    ) -> None:
+        """
+        从 ExecuteModelRequest 中删除指定的 token
+        
+        Args:
+            execute_model_req: 要修改的 ExecuteModelRequest 实例
+        Returns:
+            修改后的 ExecuteModelRequest 实例
+        """
+        # 遍历每个 sequence group metadata
+        for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+            # 创建新的 seq_data 字典
+            # 遍历每个 sequence 的 data
+            for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                # 获取当前的 token IDs
+                prompt_token_ids = seq_data.get_prompt_token_ids
+                # 创建新的不包含要删除 token 的列表
+                print (prompt_token_ids)
+                # 使用 from_seqs 创建新的 SequenceData 实例
+                seq_data.modify_prompt_token_ids(prompt_token_ids)
+        print ("Success modify_prompt_token_from_execute_model_req")
+
+
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
                      skip_proposer: bool) -> List[SamplerOutput]:
@@ -669,6 +696,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
+        execute_model_req = self.modify_prompt_token_from_execute_model_req(execute_model_req)
 
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
