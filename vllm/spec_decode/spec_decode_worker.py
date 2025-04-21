@@ -1373,6 +1373,7 @@ def prepare_prefill_hidden_states_new(
     # the input for proposer). Therefore, we shift the hidden states to
     # align n-1th hidden state with nth token.
     # 需要重新修改的逻辑，用mask取出合并后真实的隐层
+    
     return HiddenStates(prefill_hidden_states[:prompt_new_len[0]].roll(
         shifts=1, dims=0)) if prefill_hidden_states is not None else None
 
