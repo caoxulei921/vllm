@@ -403,6 +403,7 @@ class SequenceData(msgspec.Struct,
         """
         # 将新的 prompt token IDs 转换为 array 类型
         self._prompt_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, new_prompt_token_ids)
+        # self.token_chunk_size = len(new_prompt_token_ids)
         # 更新 prompt token IDs 元组缓存
         self._prompt_token_ids_tuple = tuple(self._prompt_token_ids)
         # 更新所有 token 的缓存列表
@@ -415,6 +416,7 @@ class SequenceData(msgspec.Struct,
         self._new_appended_tokens = []
         # mrope_position_delta 可能需要重新计算
         self._mrope_position_delta = None
+        
 
 
 
