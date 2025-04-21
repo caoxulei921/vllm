@@ -664,32 +664,34 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     def modify_prompt_token_from_execute_model_req(
         self,
         execute_model_req: ExecuteModelRequest
-    ) -> None:
+    ) -> List[int]:
         """
         从 ExecuteModelRequest 中删除指定的 token
         
         Args:
             execute_model_req: 要修改的 ExecuteModelRequest 实例
         Returns:
-            修改后的 ExecuteModelRequest 实例
+            修改后的 ExecuteModelRequest 实例的长度
         """
         print(execute_model_req.seq_group_metadata_list[0].seq_data)
         # 遍历每个 sequence group metadata
+        prompt_new_len = []
         for seq_group_metadata in execute_model_req.seq_group_metadata_list:
             # 创建新的 seq_data 字典
             # 遍历每个 sequence 的 data
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
                 # 获取当前的 token IDs
                 prompt_token_ids = seq_data.get_prompt_token_ids()
-                new_prompt_token_ids = [105043, 100165]
+                new_prompt_token_ids = [105043, 100165, 100165]
                 print (prompt_token_ids)
                 print (new_prompt_token_ids)
                 # 使用 from_seqs 创建新的 SequenceData 实例
                 seq_data.modify_prompt_token_ids(new_prompt_token_ids)
+                prompt_new_len.append(len(new_prompt_token_ids))
             seq_group_metadata.token_chunk_size =  len(new_prompt_token_ids)
         print ("Success modify_prompt_token_from_execute_model_req")
         print(execute_model_req.seq_group_metadata_list[0].seq_data)
-
+        return prompt_new_len
 
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
@@ -700,8 +702,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-        
-        self.modify_prompt_token_from_execute_model_req(execute_model_req)
         
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
@@ -733,13 +733,19 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # We prepare the prefill hidden states here so that there no
             # additional complexity in worker for spec_decode vs non_spec_decode
             # flow and execute_model doesn't need additional modifications.
+
+            
+            # cxl: 这里修改输入以及处理对应的previous_hidden_states，previous_hidden_states的shape和promote长度一致
+            prompt_new_len = self.modify_prompt_token_from_execute_model_req(execute_model_req)
+            
+            # previous_hidden_states shape [, 5120]
             execute_model_req.previous_hidden_states = \
-                prepare_prefill_hidden_states(
-                    sampler_output.prefill_hidden_states)
+                prepare_prefill_hidden_states_new(
+                    sampler_output.prefill_hidden_states, prompt_new_len)
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
                 self.proposer_worker.execute_model(execute_model_req)
-
+            # prefill 为什么还要管 previous_hidden_states ??
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
                                     if self._disable_logprobs else
@@ -1355,3 +1361,19 @@ def prepare_prefill_hidden_states(
     # align n-1th hidden state with nth token.
     return HiddenStates(prefill_hidden_states.roll(
         shifts=1, dims=0)) if prefill_hidden_states is not None else None
+
+
+def prepare_prefill_hidden_states_new(
+        prefill_hidden_states: torch.Tensor,
+        prompt_new_len: List[int]) -> HiddenStates:
+    # For prefill step in proposer, we run the model for N-1 tokens
+    # because Nth token will be processed in the first decode step. For
+    # N-1 tokens, the input should be 0:N-1 hidden states which should
+    # be concatanated with 1:N token (since output of scorer has to be
+    # the input for proposer). Therefore, we shift the hidden states to
+    # align n-1th hidden state with nth token.
+    # 需要重新修改的逻辑，用mask取出合并后真实的隐层
+    return HiddenStates(prefill_hidden_states[:prompt_new_len[0]].roll(
+        shifts=1, dims=0)) if prefill_hidden_states is not None else None
+
+
