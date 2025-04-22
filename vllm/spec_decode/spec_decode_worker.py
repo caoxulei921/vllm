@@ -745,7 +745,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
                 self.proposer_worker.execute_model(execute_model_req)
-            # prefill 为什么还要管 previous_hidden_states ??
+            
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
                                     if self._disable_logprobs else
@@ -886,7 +886,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         Returns a tuple of Tensors, one for the accepted token ids and one for
         the logprobs according to the scoring model.
         """
-        proposal_lens_list = proposals.proposal_lens.tolist()
+        proposal_lens_list = proposals.proposal_lens.tolist()  # equal K
 
         # vLLM currently only supports proposal lens equal to zero or the batch
         # proposal len. This adds some complexity (splitting the batch into spec
@@ -897,7 +897,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         original_indices = spec_indices + non_spec_indices
 
         # Get probabilities of target model, including bonus tokens.
-        proposal_verifier_probs = proposal_scores.probs[spec_indices]
+        proposal_verifier_probs = proposal_scores.probs[spec_indices] # ([1, 6, 152064]) (batch_size, K+1, vocab_size)
 
         # Get non-speculative sampled tokens from target model.
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
@@ -906,7 +906,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
 
         # Get probabilities according to proposal method.
-        proposal_probs = proposals.proposal_probs[spec_indices]
+        proposal_probs = proposals.proposal_probs[spec_indices] # ([1, 6, 152064]) (batch_size, K, vocab_size)
 
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
@@ -1373,7 +1373,7 @@ def prepare_prefill_hidden_states_new(
     # the input for proposer). Therefore, we shift the hidden states to
     # align n-1th hidden state with nth token.
     # 需要重新修改的逻辑，用mask取出合并后真实的隐层
-    
+
     return HiddenStates(prefill_hidden_states[:prompt_new_len[0]].roll(
         shifts=1, dims=0)) if prefill_hidden_states is not None else None
 

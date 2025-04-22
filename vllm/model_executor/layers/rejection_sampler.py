@@ -141,12 +141,12 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         else:
             accepted, recovered_token_ids = (
                 self._batch_modified_rejection_sampling(
-                    target_with_bonus_probs[:, :-1],
-                    draft_probs,
-                    draft_token_ids,
+                    target_with_bonus_probs[:, :-1], # (batch_size, K, vocab_size) unique: 0 or 1
+                    draft_probs, # (batch_size, K, vocab_size) unique: 0 or 1
+                    draft_token_ids, #(batch_size, K)
                     seeded_seqs,
                 ))
-
+            logger.info(f'accepted as {accepted}')
             output_token_ids = self._create_output(
                 accepted,
                 recovered_token_ids,
@@ -178,7 +178,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         # shape [batch_size, k]
         accepted = self._get_accepted(target_probs, draft_probs,
-                                      draft_token_ids, seeded_seqs)
+                                      draft_token_ids, seeded_seqs) 
 
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
@@ -292,7 +292,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
                                                     k - 1, target_probs.device)
-
+        # 其实这段无意义，因为rejection的概率非0即1
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
             torch.full((1, ), 1, device=target_probs.device))
