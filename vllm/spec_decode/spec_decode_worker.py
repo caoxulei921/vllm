@@ -537,8 +537,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
         if no_spec:
+            #print ("prefill")
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
+        #print ("decoding")
         return self._run_speculative_decoding_step(execute_model_req,
                                                    num_lookahead_slots)
 
@@ -706,19 +708,34 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     sampler_output.prefill_hidden_states)
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
-                self.proposer_worker.execute_model(execute_model_req)
+                proposer_sampler_output = self.proposer_worker.execute_model(execute_model_req)
+
+            assert len(proposer_sampler_output) == 1
+            proposer_sampler_output = proposer_sampler_output[0]
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
                                     if self._disable_logprobs else
                                     [sampler_output])
 
+        proposer_sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
+            execute_model_req=execute_model_req, sampler_output=proposer_sampler_output)
+                                    if self._disable_logprobs else
+                                    [proposer_sampler_output])
+    
+        #print (f"LLM prefills: first token {sampler_output_to_return[0].outputs[0].samples[0].output_token}")
+        #print (f"Eagle prefills: first token {proposer_sampler_output_to_return[0].outputs[0].samples[0].output_token}")
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
         sampler_output.sampled_token_probs = None
         sampler_output.sampled_token_ids = None
         sampler_output.logprobs = None
-        return sampler_output_to_return
+
+
+        proposer_sampler_output.sampled_token_probs = None
+        proposer_sampler_output.sampled_token_ids = None
+        proposer_sampler_output.logprobs = None
+        return proposer_sampler_output_to_return
 
     def _run_non_driver_rank(self) -> bool:
         """Run proposer and verifier model in non-driver workers. This is used
@@ -824,10 +841,14 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
-
+        
+        #print (f'the decode seq of eagle is {proposals.proposal_token_ids}')
+        #print (f'the ori accepted_token_ids is {accepted_token_ids}')
+        all_accepted_token_ids = torch.cat((proposals.proposal_token_ids, torch.tensor([[-1]], device=proposals.proposal_token_ids.device)), dim=1)
+        #print (f'the all accepted_token_ids is {all_accepted_token_ids}')
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
-            accepted_token_ids,
+            all_accepted_token_ids,
             target_logprobs=target_logprobs,
             prompt_logprobs=proposal_scores.prompt_logprobs
             if not self._disable_logprobs else None,

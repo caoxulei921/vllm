@@ -82,7 +82,7 @@ class EAGLE(nn.Module):
 
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
-                            bias=getattr(self.config, "eagle_fc_bias", False))
+                            bias=getattr(self.config, "eagle_fc_bias", True))
 
         # Modify layer normalization and residual connections as suggested
         # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
