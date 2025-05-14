@@ -7,7 +7,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 prompts = [
     "根据临床表现，你需要进一步住院治疗，并抽血化验",
-]
+] * 10
 
 # sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 sampling_params = SamplingParams(top_k=1, max_tokens=50)
@@ -28,7 +28,6 @@ llm = LLM(
 
 #llm = LLM(model='/data/sxh/models/Qwen2.5-32B-Instruct-AWQ')
 outputs = llm.generate(prompts, sampling_params)
-
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text

@@ -844,7 +844,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         
         #print (f'the decode seq of eagle is {proposals.proposal_token_ids}')
         #print (f'the ori accepted_token_ids is {accepted_token_ids}')
-        all_accepted_token_ids = torch.cat((proposals.proposal_token_ids, torch.tensor([[-1]], device=proposals.proposal_token_ids.device)), dim=1)
+        padding_tensor = torch.full((proposals.proposal_token_ids.size(0), 1), -1, device=proposals.proposal_token_ids.device)
+        all_accepted_token_ids = torch.cat((proposals.proposal_token_ids, padding_tensor), dim=1)
         #print (f'the all accepted_token_ids is {all_accepted_token_ids}')
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
