@@ -5,7 +5,7 @@ import weakref
 from typing import Dict, List, Set, Tuple
 
 import torch
-
+import json
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -88,9 +88,11 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             expanded_request.num_steps = sample_len
             self.model_runner.set_indices_of_seq_with_bonus_tokens(
                 indices_of_seq_with_bonus_tokens)
+            
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)
-        else:
+            pass
+        else:  # 不会进
             # Here we run multi-step directly, with every step prepared
             # on the CPU.
             # TODO: Remove this branch once DraftModelRunner supports TP>1
@@ -415,3 +417,4 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         weight_loader(
             self.worker.model_runner.model_runner.model.lm_head.weight,
             lm_head_weight)
+    

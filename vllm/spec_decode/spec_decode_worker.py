@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
 import torch.nn as nn
-
+import math 
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
                                                get_tp_group,
@@ -360,9 +360,16 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     weight.data,
                     dim=0,
             )
-
+            
+            if self.proposer_worker.worker.model_runner.model_runner.model.lm_head.weight.shape[0] != target_lm_head_weight.shape[0]:
+                from safetensors.torch import load_file
+                import os
+                target_lm_head_weight = load_file(os.path.join(self.proposer_worker.worker.speculative_config.model, "lm_head.safetensors"))['lm_head']
             self.proposer_worker.maybe_load_lm_head_weight(
                 target_lm_head_weight)
+        
+        self.proposer_worker.load_vocab_trans_dict(self.proposer_worker.worker.speculative_config.vocab_trans_dict)
+        
 
         self._metrics.init_tensors(self.rank, device_type=self.device)
         if model_parallel_is_initialized():
@@ -384,7 +391,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         self.scorer = scorer_cls(scorer_worker=self.scorer_worker,
                                  device=self.device,
-                                 vocab_size=self._vocab_size)
+                                 vocab_size=self.scorer_worker.vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -736,15 +743,15 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
             
             # cxl: 这里修改输入以及处理对应的previous_hidden_states，previous_hidden_states的shape和promote长度一致
-            prompt_new_len = self.modify_prompt_token_from_execute_model_req(execute_model_req)
+            # prompt_new_len = self.modify_prompt_token_from_execute_model_req(execute_model_req)
             
             # previous_hidden_states shape [, 5120]
             execute_model_req.previous_hidden_states = \
-                prepare_prefill_hidden_states_new(
-                    sampler_output.prefill_hidden_states, prompt_new_len)
+                prepare_prefill_hidden_states(
+                    sampler_output.prefill_hidden_states)
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
-                self.proposer_worker.execute_model(execute_model_req)
+                sampler_output_eagle = self.proposer_worker.execute_model(execute_model_req)
             
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
@@ -1294,7 +1301,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             worker.vocab_size
             for worker in [self.proposer_worker, self.scorer_worker]
         ]
-        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
+        # assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
         return vocab_sizes[0]
 
     @property

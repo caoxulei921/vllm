@@ -3,7 +3,8 @@
 from typing import List, Optional
 
 import torch
-
+import math
+import json
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
 
@@ -53,6 +54,35 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
+        self.load_vocab_trans_dict(dict_path = "/data/framework_vllm/zch/dict.json")
+
+    def load_vocab_trans_dict(
+        self,
+        dict_path            
+    ) -> None:
+        try:
+            with open(dict_path, 'r', encoding='utf-8') as f:
+                self.rule_dict = json.load(f)
+        except FileNotFoundError:
+            print(f"file not exist: {dict_path}")
+        except json.JSONDecodeError:
+            print("file format error: {dict_path}")
+        # 2. 遍历规则并生成 src_ids 和 tgt_ids
+        src_ids = []
+        tgt_ids = []
+        for tgt, src_and_others in self.rule_dict.items():
+            tgt = int(tgt)
+            if not src_and_others:  # 跳过空list
+                continue
+            #src = int(src_and_others[0])  # 取第一个作为 src
+            src_ids.append(src_and_others)
+            tgt_ids.append(tgt)
+        # 3. 转为 tensor 并搬到GPU
+        self.src_ids = torch.tensor(
+            [x + [-1] * (max(len(x) for x in src_ids) - len(x)) for x in src_ids],
+            dtype=torch.int, device=self.device)
+        self.tgt_ids = torch.tensor(tgt_ids, dtype=torch.int, device=self.device)
+
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
@@ -263,6 +293,26 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             hidden_states = previous_hidden_states
 
         outputs: List[SamplerOutput] = []
+
+        if not hasattr(self, 'PAD_ORIGIN_VOCAB_SIZE'):
+            if hasattr(self.model.config, 'PAD_ORIGIN_VOCAB_SIZE') and \
+                hasattr(self.model.config, 'TRUE_EXPAND_VOCAB_SIZE') and \
+                hasattr(self.model.config, 'TRUE_ORIGIN_VOCAB_SIZE'):
+                self.PAD_ORIGIN_VOCAB_SIZE = self.model.config.PAD_ORIGIN_VOCAB_SIZE
+                self.TRUE_EXPAND_VOCAB_SIZE = self.model.config.TRUE_EXPAND_VOCAB_SIZE
+                self.TRUE_ORIGIN_VOCAB_SIZE = self.model.config.TRUE_ORIGIN_VOCAB_SIZE
+                self.ADJUSTED_EXPAND_IDS_SIZE = math.ceil(self.TRUE_EXPAND_VOCAB_SIZE / 256) * 256
+                self.PAD_EXPAND_VOCAB_SIZE = self.PAD_ORIGIN_VOCAB_SIZE + self.ADJUSTED_EXPAND_IDS_SIZE
+        
+        if model_input.is_prompt: ##如果是prefill则退化成原始方法
+            kwargs["is_prompt"] = True
+        else:
+            kwargs["is_prompt"] = False
+            kwargs["src_ids"] = self.src_ids
+            kwargs["tgt_ids"] = self.tgt_ids
+
+
+
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
@@ -292,13 +342,31 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata,
                                                **compute_logits_kwargs)
+
+
+
+
+
+            logits_part1 = logits[:, :self.PAD_ORIGIN_VOCAB_SIZE]       # 原始词表部分
+            logits_part2 = logits[:, self.PAD_ORIGIN_VOCAB_SIZE:]       # padding / 扩展词表部分
+            
             if not self.is_driver_worker:
                 return []
             # Sample the next token.
             output = self.model.sample(
-                logits=logits,
+                logits=logits_part1,
                 sampling_metadata=model_input.sampling_metadata,
             )
+
+            if kwargs.get("is_prompt") is True:
+                pass  ## prefill阶段无改造
+            elif kwargs.get("is_prompt") is False:
+                activate_ids = logits_part2.argmax(-1)
+                if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
+                    replace_token_ids = self.src_ids[activate_ids]
+
+
+
             outputs.append(output)
 
             if self.return_hidden_states and is_fallback:

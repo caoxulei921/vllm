@@ -2239,7 +2239,8 @@ class SpeculativeConfig:
                                             init=True)  # type: ignore
     draft_parallel_config: ParallelConfig = field(default=None,
                                                   init=True)  # type: ignore
-
+    vocab_trans_dict : Optional[str] = None
+    
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
