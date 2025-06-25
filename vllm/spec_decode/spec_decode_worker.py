@@ -826,6 +826,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         with Timer() as proposal_timer:
             # Generate proposals using draft worker.
+            print("SD run draft")
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
 

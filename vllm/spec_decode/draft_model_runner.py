@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 
 # A flag to enable debug prints for the updated input tensors
 # before each step.
-debug_advance_input = False
+debug_advance_input = True
 # A flag to allow GPU advance step for draft model runner.
 # Set to False for debugging.
 allow_gpu_advance_step = True
@@ -146,17 +146,17 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         new_model_input.sampling_metadata.reuse_sampling_tensors = True
 
         if debug_advance_input:
-            logger.debug("NEW INPUT: ")
-            logger.debug("  input_tokens = %s", new_model_input.input_tokens)
-            logger.debug("  input_positions = %s",
+            print("NEW INPUT: ")
+            print("  input_tokens = %s", new_model_input.input_tokens)
+            print("  input_positions = %s",
                          new_model_input.input_positions)
-            logger.debug("  seq_lens = %d", new_model_input.seq_lens)
-            logger.debug("  query_lens = %d", new_model_input.query_lens)
-            logger.debug("  attn_metadata:")
-            logger.debug("    seq_lens_tensor: %s",
+            print("  seq_lens = %d", new_model_input.seq_lens)
+            print("  query_lens = %d", new_model_input.query_lens)
+            print("  attn_metadata:")
+            print("    seq_lens_tensor: %s",
                          attn_metadata.seq_lens_tensor)
-            logger.debug("    slot_mapping: %s", attn_metadata.slot_mapping)
-            logger.debug("    block_tables: %s", attn_metadata.block_tables)
+            print("    slot_mapping: %s", attn_metadata.slot_mapping)
+            print("    block_tables: %s", attn_metadata.block_tables)
 
         return new_model_input
 
@@ -216,6 +216,11 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # advance_step, which runs prepare_inputs on CPU and for each spec
         # iteration invokes this function only once
         # (Look at multi-step-worker code)
+        print("execute_model INPUT: ")
+        print("  input_tokens = %s", model_input.input_tokens)
+        print("  input_positions = %s",
+                         model_input.input_positions)
+
         is_fallback = num_steps == 1
         if not is_fallback:
             # Since we do not broadcast data inside execute_model anymore,
@@ -362,8 +367,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 pass  ## prefill阶段无改造
             elif kwargs.get("is_prompt") is False:
                 activate_ids = logits_part2.argmax(-1)
-                if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
-                    replace_token_ids = self.src_ids[activate_ids]
+                pass
+                # if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
+                #     replace_token_ids = self.src_ids[activate_ids]
 
 
 
