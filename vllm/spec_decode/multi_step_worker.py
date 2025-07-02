@@ -62,6 +62,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
         seq_ids_with_bonus_token_in_last_step: Set[int],
+        special_pos_idx
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
@@ -76,7 +77,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         # response to retain only the original sequences' responses.
         expanded_request, indices_of_seq_with_bonus_tokens =\
             self._expand_execute_model_request(
-                execute_model_req, seq_ids_with_bonus_token_in_last_step)
+                execute_model_req, seq_ids_with_bonus_token_in_last_step, special_pos_idx)
 
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
@@ -138,6 +139,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
     def _expand_execute_model_request(
         execute_model_req: ExecuteModelRequest,
         seq_with_bonus_token_in_last_step: set,
+        special_pos_idx
     ) -> Tuple[ExecuteModelRequest, List[int]]:
         """
         Expands the execute model request based on sequences with bonus
@@ -174,15 +176,33 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 #Create new sequences without the last bonus token. These new
                 # sequence have the same sequence id as the original sequence.
                 # We create a new sequence group and add them there.
-                updated_seq_group_without_bonus_token  = \
-                    MultiStepWorker._copy_seq_metadata_excluding_last_token(
-                        seq_group, seq_with_bonus_token_in_last_step)
-                updated_seq_group_metadata_list.append(
-                    updated_seq_group_without_bonus_token)
+                # Return and input  type <class 'vllm.sequence.SequenceGroupMetadata'>
+                # 遇到通过的特殊词 需要额外的扩展, 多batch不支持
+                #for expand_num in range(-special_pos_idx[seq_id][0].item()):
+                for expand_num in range(-special_pos_idx.item()):
+                    if expand_num > 0:
+                        print (f"** Enter special expand :{special_pos_idx} with step: {expand_num}")
+                    if len(updated_seq_group_metadata_list) == 0:
+                        updated_seq_group_without_bonus_token  = \
+                            MultiStepWorker._copy_seq_metadata_excluding_last_token(
+                                seq_group, seq_with_bonus_token_in_last_step)
+                    else:
+                        updated_seq_group_without_bonus_token  = \
+                            MultiStepWorker._copy_seq_metadata_excluding_last_token(
+                                updated_seq_group_without_bonus_token, seq_with_bonus_token_in_last_step)
+                    # 改为放在list第一个元素插入
+                    updated_seq_group_metadata_list.insert(0,
+                        updated_seq_group_without_bonus_token)
+            
             # Add the original sequence group.
             updated_seq_group_metadata_list.append(
                 MultiStepWorker._shallow_copy_seq_group_metadata(seq_group))
             # Record the index of the original sequence group.
+            print (f"** total expand len: {len(updated_seq_group_metadata_list)}")
+            for i in updated_seq_group_metadata_list:
+                for j in i.seq_data.keys(): 
+                    print (f"** num_computed_tokens: {i.seq_data[j]._num_computed_tokens}")
+            
             indices_of_original_sequence_groups.append(
                 len(updated_seq_group_metadata_list) - 1)
 
@@ -193,7 +213,8 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                       HiddenStates):
             updated_execute_model_req.previous_hidden_states\
                 .expand_with_bonus_tokens(seq_with_bonus_token_in_last_step)
-
+            
+            print (f"** previous_hidden_states shape {updated_execute_model_req.previous_hidden_states.hidden_states.shape}")
         return updated_execute_model_req, indices_of_original_sequence_groups
 
     @staticmethod
@@ -241,12 +262,13 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         seq_ids_with_bonus_token_in_last_step: set,
+        special_pos_idx
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
         return self._proposer.get_spec_proposals(
-            execute_model_req, seq_ids_with_bonus_token_in_last_step)
+            execute_model_req, seq_ids_with_bonus_token_in_last_step, special_pos_idx)
 
     @staticmethod
     def _append_new_tokens(

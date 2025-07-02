@@ -7,6 +7,7 @@ import math
 import json
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
+import copy
 
 try:
     try:
@@ -343,13 +344,10 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                     **model_execute_kwargs,
                 )
 
-            # Compute the logits.
+            #Compute the logits.
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata,
                                                **compute_logits_kwargs)
-
-
-
 
 
             logits_part1 = logits[:, :self.PAD_ORIGIN_VOCAB_SIZE]       # 原始词表部分
@@ -362,15 +360,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 logits=logits_part1,
                 sampling_metadata=model_input.sampling_metadata,
             )
-
-            if kwargs.get("is_prompt") is True:
-                pass  ## prefill阶段无改造
-            elif kwargs.get("is_prompt") is False:
-                activate_ids = logits_part2.argmax(-1)
-                pass
-                # if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
-                #     replace_token_ids = self.src_ids[activate_ids]
-
 
 
             outputs.append(output)
@@ -401,6 +390,34 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                             i, :] = model_input.input_tokens[bonus_seq_idx]
                     else:
                         count += 1
+
+            if kwargs.get("is_prompt") is True:
+                pass  ## prefill阶段无改造
+            elif kwargs.get("is_prompt") is False:
+                activate_ids = logits_part2[-1].argmax(-1).item()
+                if logits_part1.shape[0] > 1:
+                    pass
+                #    activate_ids = 1207
+                #if step == 2:
+                #    activate_ids = 1207
+                if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
+                    replace_token_ids = self.src_ids[activate_ids]
+                    replace_token_ids = replace_token_ids.masked_select(replace_token_ids != -1)
+                    print (f"** Step: {step}, Enter Special token ids:{activate_ids}  replace with: {replace_token_ids}"  )
+                    for i in range(replace_token_ids.shape[0]):
+                        if i == 0:
+                            output.sampled_token_ids[bonus_seq_idx][0] = replace_token_ids[0]
+                            model_input = self._gpu_advance_step(model_input, outputs[-1])
+                            output_special = copy.deepcopy(output)
+                            output_special.logprobs.fill_(-1)
+                            output_special.sampled_token_probs.fill_(-1)
+                        else:
+                            output_special.sampled_token_ids = torch.cat([output_special.sampled_token_ids[1:], replace_token_ids[i].reshape(1, 1)], dim=0)
+                            outputs.append(output_special)
+                            if i < replace_token_ids.shape[0] - 1:
+                                output_special = copy.deepcopy(output_special)
+                                #model_input = self._gpu_advance_step(model_input, outputs[-1])
+                    return outputs    ## 早停
 
             # Prepare inputs for the next step
             if step != num_steps - 1:

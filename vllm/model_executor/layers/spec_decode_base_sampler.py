@@ -114,7 +114,7 @@ class SpecDecodeBaseSampler(nn.Module):
         bonus_token_ids = bonus_token_ids.squeeze(-1)
         # Determine the index of the first False value for each row.
         limits = (accepted == 0).max(1).indices   #第一个被拒绝的位置
-        limits[~(accepted == 0).any(1)] = k
+        limits[~(accepted == 0).any(1)] = k       #全部 accepted 的，设为 k
 
         # Create masks using the indices.
         indices = torch.arange(k, device=accepted.device).unsqueeze(0)

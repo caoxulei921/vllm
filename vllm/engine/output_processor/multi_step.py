@@ -102,8 +102,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         for output in outputs:
             if output.samples[0].output_token != VLLM_INVALID_TOKEN_ID:
-                sequence_group.metrics.spec_token_acceptance_counts[
-                    output.step_index] += 1
+                # 如果是特殊词导致的超长，则接受统一记到最后一个token上
+                if output.step_index < len(sequence_group.metrics.spec_token_acceptance_counts):
+                    sequence_group.metrics.spec_token_acceptance_counts[
+                        output.step_index] += 1
+                else:
+                    sequence_group.metrics.spec_token_acceptance_counts[-1] += 1 
 
         assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (

@@ -340,6 +340,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
+        self.special_pos_idx =  torch.tensor([-1], dtype=torch.long)
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -484,6 +485,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         all_prompt = True
         atleast_one_prompt = False
         all_zero_spec_tokens = True
+        self.second_last_token_hidden_states = None
         for sgm in execute_model_req.seq_group_metadata_list:
             all_prompt = all_prompt and sgm.is_prompt
             atleast_one_prompt = atleast_one_prompt or sgm.is_prompt
@@ -713,7 +715,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
-
         # Store hidden states from target model execution, BxD.
         hidden_states = sampler_output.hidden_states
         if hidden_states is not None:
@@ -733,6 +734,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     hidden_states, seq_group_meta_with_hidden)
             elif self.previous_hidden_states and len(
                     seq_group_meta_with_hidden):
+                self.previous_hidden_states.second_last_token_hidden_states = None
                 self.previous_hidden_states.update(hidden_states,
                                                    seq_group_meta_with_hidden)
 
@@ -828,7 +830,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # Generate proposals using draft worker.
             print("SD run draft")
             proposals = self.proposer_worker.get_spec_proposals(
-                execute_model_req, self._seq_with_bonus_token_in_last_step)
+                execute_model_req, self._seq_with_bonus_token_in_last_step, self.special_pos_idx)
 
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
@@ -836,6 +838,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                                "workers generate no tokens")
 
         execute_model_req.previous_hidden_states = None
+
+        ##eagle 模型输出长度不定长，动态更新
+        execute_model_req.num_lookahead_slots = proposals.proposal_token_ids.shape[1]
+        proposals.proposal_lens[0] = proposals.proposal_token_ids.shape[1]
 
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(
@@ -863,7 +869,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             self.proposer_worker.execute_model(prefill_req)
 
         with Timer() as verification_timer:
-            accepted_token_ids, target_logprobs = self._verify_tokens(
+            accepted_token_ids, target_logprobs, self.special_pos_idx = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
 
@@ -929,13 +935,16 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 if sgm.sampling_params.seed is not None
             }
 
-        accepted_token_ids = self.spec_decode_sampler(
+        accepted_token_ids, special_pos_idx = self.spec_decode_sampler(
             target_with_bonus_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
             **sampler_extra_kwargs,
         )
+    
+
+
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
@@ -969,13 +978,22 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 terminal_metadata)
             index = accepted_index[:, None, None].expand(-1, 1,
                                                          hs_size)  # b x 1 x d
-            second_last_token_hidden_states = hidden_states[:, -2]  # b x d
+            ## 借用这个变量来存储特殊词的首token的hidden_state
+            ## 只检查了单batch，多batch逻辑还有问题需要重新开发，second_last_token_hidden_states需要解决到-1的变长
+            if hidden_states.shape[0] == 1:
+                second_last_token_hidden_states = hidden_states[:, special_pos_idx.item()-1: -1]  # b x d 
+            else:
+                T = hidden_states.shape[1]
+                pos = special_pos_idx + T  # [-2] -> 2, [-3] -> 1, [-1] -> 3 T=4
+                special_index = pos.unsqueeze(-1).expand(-1, 1, hs_size)
+                second_last_token_hidden_states = hidden_states.gather(1, special_index).squeeze(1)
+            
             hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
             # Store hidden states from target model for subsequent decode step
             self.previous_hidden_states = HiddenStates(
                 hidden_states, terminal_metadata,
                 second_last_token_hidden_states)
-        return accepted_token_ids, logprobs
+        return accepted_token_ids, logprobs, special_pos_idx
 
     def _create_output_sampler_list(
         self,

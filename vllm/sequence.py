@@ -1310,17 +1310,26 @@ class HiddenStates(msgspec.Struct, array_like=True,
         if self.second_last_token_hidden_states is None \
             or not seq_with_bonus_token_in_last_step:
             return
-
+        
+        # 只考虑了单batch，多batch暂未考虑
         index = []
         for seq_id in self._seq_ids:
             i = self._seq_ids.index(seq_id)
             if seq_id in seq_with_bonus_token_in_last_step:
-                index.append(i + len(self._seq_ids))
+                if self.second_last_token_hidden_states.dim() == 2:
+                    index.append(i + len(self._seq_ids))
+                elif self.second_last_token_hidden_states.dim() == 3:
+                    second_last_token_hidden_states_len = self.second_last_token_hidden_states.shape[1]
+                    for j in range(second_last_token_hidden_states_len):
+                        index.append(i + j + len(self._seq_ids))
             index.append(i)
 
-        self.hidden_states = torch.cat(
-            [self.hidden_states, self.second_last_token_hidden_states])[index]
-
+        if self.second_last_token_hidden_states.dim() == 2:
+            self.hidden_states = torch.cat(
+                [self.hidden_states, self.second_last_token_hidden_states])[index]
+        elif self.second_last_token_hidden_states.dim() == 3:   
+            self.hidden_states = torch.cat(
+                [self.hidden_states, self.second_last_token_hidden_states.squeeze(0)])[index]
 
 class ExecuteModelRequest(
         msgspec.Struct,
