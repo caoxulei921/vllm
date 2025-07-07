@@ -1904,6 +1904,11 @@ class SchedulerConfig:
     default scheduler. Can be a class directly or the path to a class of form
     "mod.custom_class"."""
 
+    speculative_append_slots_len: int = 0
+    """
+    由于特殊词在一个自回归阶段会生成多个token，所以需要预先分配token KV blocks，取值为特殊词最大长度-1
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

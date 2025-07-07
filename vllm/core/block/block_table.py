@@ -144,7 +144,6 @@ class BlockTable:
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
-
         # Drop blocks that are no longer needed due to sliding window
         if self._max_block_sliding_window is not None:
             null_block = self._allocator.allocate_or_get_null_block()
@@ -156,20 +155,16 @@ class BlockTable:
                 if b is not null_block:
                     self._allocator.free(b)
                     self._blocks[idx] = null_block
-
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots,
                                     extra_hash=extra_hash)
-
         # Update the blocks with the new tokens
         first_block_idx = self._num_full_slots // self._block_size
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
-
         for i, token_block in enumerate(token_blocks):
             self._blocks.append_token_ids(first_block_idx + i, token_block)
-
         self._num_full_slots += len(token_ids)
 
     def ensure_num_empty_slots(self,

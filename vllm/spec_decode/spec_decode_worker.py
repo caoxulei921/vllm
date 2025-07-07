@@ -477,7 +477,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # execution loop.
             broadcast_tensor_dict({}, src=0)
             return []
+        
 
+    
         self._track_finished_requests(execute_model_req)
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
@@ -682,7 +684,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         Returns:
             修改后的 ExecuteModelRequest 实例的长度
         """
-        print(execute_model_req.seq_group_metadata_list[0].seq_data)
         # 遍历每个 sequence group metadata
         prompt_new_len = []
         for seq_group_metadata in execute_model_req.seq_group_metadata_list:
@@ -692,14 +693,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 # 获取当前的 token IDs
                 prompt_token_ids = seq_data.get_prompt_token_ids()
                 new_prompt_token_ids = [105043, 100165, 100165]
-                print (prompt_token_ids)
-                print (new_prompt_token_ids)
                 # 使用 from_seqs 创建新的 SequenceData 实例
                 seq_data.modify_prompt_token_ids(new_prompt_token_ids)
                 prompt_new_len.append(len(new_prompt_token_ids))
             seq_group_metadata.token_chunk_size =  len(new_prompt_token_ids)
-        print ("Success modify_prompt_token_from_execute_model_req")
-        print(execute_model_req.seq_group_metadata_list[0].seq_data)
         return prompt_new_len
 
     @nvtx_range("spec_decode_worker._run_no_spec")
@@ -825,13 +822,12 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Pass last hidden states from target model to proposer
         execute_model_req.previous_hidden_states = self.previous_hidden_states
         self.previous_hidden_states = None
-
+               
         with Timer() as proposal_timer:
             # Generate proposals using draft worker.
-            print("SD run draft")
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step, self.special_pos_idx)
-
+            
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
@@ -842,6 +838,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         ##eagle 模型输出长度不定长，动态更新
         execute_model_req.num_lookahead_slots = proposals.proposal_token_ids.shape[1]
         proposals.proposal_lens[0] = proposals.proposal_token_ids.shape[1]
+
 
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(

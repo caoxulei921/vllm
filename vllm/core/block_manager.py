@@ -174,7 +174,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         seq = waiting_seqs[0]
         block_table: BlockTable = self._allocate_sequence(seq)
         self.block_tables[seq.seq_id] = block_table
-
         # Track seq
         self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
@@ -239,7 +238,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
     ) -> List[Tuple[int, int]]:
 
         block_table = self.block_tables[seq.seq_id]
-
         block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
@@ -279,6 +277,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
+        return block_ids  # type: ignore
+    
+    def get_block_table_new(self, seq: int) -> List[int]:
+        try:
+            block_ids = self.block_tables[seq].physical_block_ids
+        except:
+            block_ids = self.block_tables
         return block_ids  # type: ignore
 
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:

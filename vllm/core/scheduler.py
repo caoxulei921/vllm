@@ -534,6 +534,8 @@ class Scheduler:
         for i in range(1, self.scheduler_config.max_num_partial_prefills + 1):
             self.partial_prefill_budget_lookup_list[i] = (
                 scheduler_config.max_num_batched_tokens // i)
+        
+        self.speculative_append_slots_len = scheduler_config.speculative_append_slots_len
 
     @property
     def next_cache_id(self):
@@ -716,7 +718,6 @@ class Scheduler:
                 budget,
                 partial_prefill_metadata,
             )
-
             num_running_tokens = num_uncached_new_tokens
             if num_running_tokens == 0:
                 # No budget => Stop
@@ -758,7 +759,6 @@ class Scheduler:
                     # (since there is nothing else to preempt)
                     victim_seq_group = seq_group
                     cont_loop = False
-
                 # With async postprocessor, before preempting a sequence
                 # we need to ensure it has no pending async postprocessor
                 do_preempt = True
@@ -772,7 +772,6 @@ class Scheduler:
                     if victim_seq_group.is_finished():
                         self._free_finished_seq_group(victim_seq_group)
                         do_preempt = False
-
                 # Do preemption
                 if do_preempt:
                     preempted_mode = self._preempt(victim_seq_group,
@@ -787,7 +786,6 @@ class Scheduler:
             else:
                 self._append_slots(seq_group, blocks_to_copy, enable_chunking)
                 is_prefill = seq_group.is_prefill()
-
                 scheduled_seq_group: ScheduledSequenceGroup = (
                     self._scheduled_seq_group_cache[
                         self.cache_id].get_object())
@@ -800,7 +798,6 @@ class Scheduler:
                     scheduled_seq_group.token_chunk_size = 1
                     decode_seq_groups.append(scheduled_seq_group)
                     ret.decode_seq_groups_list.append(seq_group)
-
                 budget.add_num_batched_tokens(seq_group.request_id,
                                               num_running_tokens)
                 # OPTIMIZATION:  Note that get_max_num_running_seqs is
@@ -812,7 +809,6 @@ class Scheduler:
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
-
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
 
@@ -1247,7 +1243,6 @@ class Scheduler:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
                                                enable_chunking=False)
-
         if len(prefills.seq_groups
                ) == 0 and self.scheduler_config.policy == "priority":
             self._schedule_priority_preemption(budget)
@@ -1259,7 +1254,6 @@ class Scheduler:
             running_scheduled = self._schedule_running(budget,
                                                        curr_loras,
                                                        enable_chunking=False)
-
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
             if (len(running_scheduled.preempted) +
@@ -1292,7 +1286,7 @@ class Scheduler:
         # doesn't allow chunked prefills.
         assert len(running_scheduled.prefill_seq_groups) == 0
         assert len(swapped_in.prefill_seq_groups) == 0
-
+        
         # Merge lists
         num_prefill_groups = len(prefills.seq_groups)
         if num_prefill_groups > 0:
@@ -1737,7 +1731,7 @@ class Scheduler:
             seq_status = None
 
         for seq in seq_group.get_seqs(status=seq_status):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows = self.block_manager.append_slots(seq, num_lookahead_slots+self.speculative_append_slots_len)
             if len(cows) > 0:
                 blocks_to_copy.extend(cows)
 

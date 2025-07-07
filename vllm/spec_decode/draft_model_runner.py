@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 
 # A flag to enable debug prints for the updated input tensors
 # before each step.
-debug_advance_input = True
+debug_advance_input = False
 # A flag to allow GPU advance step for draft model runner.
 # Set to False for debugging.
 allow_gpu_advance_step = True
@@ -118,10 +118,13 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-
+        if debug_advance_input:
+            print ("** Before advance_step")
+            print("    slot_mapping: %s", attn_metadata.slot_mapping)
+            print("    block_tables: %s", attn_metadata.block_tables)
+            print ("\n")
         attn_metadata.advance_step(model_input, sampled_token_ids,
                                    self.block_size, num_seqs, num_queries)
-
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
         self._update_sampling_metadata(sampling_metadata, num_seqs,
@@ -217,10 +220,13 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # advance_step, which runs prepare_inputs on CPU and for each spec
         # iteration invokes this function only once
         # (Look at multi-step-worker code)
-        print("execute_model INPUT: ")
-        print("  input_tokens = %s", model_input.input_tokens)
-        print("  input_positions = %s",
-                         model_input.input_positions)
+        if debug_advance_input:
+            print("execute_model INPUT: ")
+            print("  input_tokens = %s", model_input.input_tokens)
+            print("  input_positions = %s",
+                            model_input.input_positions)
+            print("    slot_mapping: %s", model_input.attn_metadata.slot_mapping)
+            print("    block_tables: %s", model_input.attn_metadata.block_tables)
 
         is_fallback = num_steps == 1
         if not is_fallback:
@@ -380,34 +386,46 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 assert num_tokens_per_seq == 1
                 count = 0
                 for i in range(nums_seqs):
-                    bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
-                        count]
-                    if i != bonus_seq_idx:
-                        # The following might cause a cpu->gpu sync
-                        # However, the performance impact is negligible as we
-                        # benchmarked on H100.
-                        output.sampled_token_ids[
-                            i, :] = model_input.input_tokens[bonus_seq_idx]
-                    else:
-                        count += 1
+                    if nums_seqs >= 3:
+                        ##正常情况只有特殊词被接受后，下一轮才会进入这个逻辑nums_seqs == 特殊词长度 + 1（bounds）
+                        bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
+                            count]
+                        if debug_advance_input:
+                            print (f"** ori sampled_token_ids: {output.sampled_token_ids}")
+                        if i != bonus_seq_idx:
+                            output.sampled_token_ids[
+                                i, :] = model_input.input_tokens[i+1]
+                        else:
+                            count += 1
+                        if debug_advance_input:
+                            print (f"** final sampled_token_ids: {output.sampled_token_ids}")
+
+                    elif nums_seqs <= 2:
+                        ##非特殊词包含bounds会进入这个逻辑
+                        bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
+                            count]
+                        if i != bonus_seq_idx:
+                            # The following might cause a cpu->gpu sync
+                            # However, the performance impact is negligible as we
+                            # benchmarked on H100.
+                            output.sampled_token_ids[
+                                i, :] = model_input.input_tokens[bonus_seq_idx]
+                        else:
+                            count += 1
 
             if kwargs.get("is_prompt") is True:
                 pass  ## prefill阶段无改造
             elif kwargs.get("is_prompt") is False:
                 activate_ids = logits_part2[-1].argmax(-1).item()
-                if logits_part1.shape[0] > 1:
-                    pass
-                #    activate_ids = 1207
-                #if step == 2:
-                #    activate_ids = 1207
                 if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
                     replace_token_ids = self.src_ids[activate_ids]
                     replace_token_ids = replace_token_ids.masked_select(replace_token_ids != -1)
-                    print (f"** Step: {step}, Enter Special token ids:{activate_ids}  replace with: {replace_token_ids}"  )
+                    if debug_advance_input:
+                        print (f"** Step: {step}, Enter Special token ids:{activate_ids}  replace with: {replace_token_ids}"  )
                     for i in range(replace_token_ids.shape[0]):
                         if i == 0:
                             output.sampled_token_ids[bonus_seq_idx][0] = replace_token_ids[0]
-                            model_input = self._gpu_advance_step(model_input, outputs[-1])
+                            #model_input = self._gpu_advance_step(model_input, outputs[-1])
                             output_special = copy.deepcopy(output)
                             output_special.logprobs.fill_(-1)
                             output_special.sampled_token_probs.fill_(-1)
@@ -421,6 +439,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
             # Prepare inputs for the next step
             if step != num_steps - 1:
+                if debug_advance_input:
+                    print (f"** Step: {step}, Enter gpu advance step")
                 model_input = self._gpu_advance_step(model_input, outputs[-1])
 
         return outputs

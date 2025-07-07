@@ -305,12 +305,12 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             row = selected_draft_probs[i]
             first_invalid = (row < 0.0).nonzero(as_tuple=True)[0]
             if len(first_invalid) > 0:
-                print (f"** ori accepted: {accepted} with selected_draft_probs: {selected_draft_probs}")
+                logger.info (f"** ori accepted: {accepted} with selected_draft_probs: {selected_draft_probs}")
                 pos = first_invalid[0].item()
                 assert pos > 0
                 accepted[i, pos:] = accepted[i, pos - 1]
                 pos_idx[i] = pos - len(row) - 1 # 特殊词第一个token, 倒着数 -1表示没有特殊词
-                print (f"** modify accepted: {accepted}, pos_idx: {pos_idx}")
+                logger.info (f"** modify accepted: {accepted}, pos_idx: {pos_idx}")
         return accepted, pos_idx
 
     def _get_recovered_probs(

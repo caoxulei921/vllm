@@ -180,8 +180,6 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 # 遇到通过的特殊词 需要额外的扩展, 多batch不支持
                 #for expand_num in range(-special_pos_idx[seq_id][0].item()):
                 for expand_num in range(-special_pos_idx.item()):
-                    if expand_num > 0:
-                        print (f"** Enter special expand :{special_pos_idx} with step: {expand_num}")
                     if len(updated_seq_group_metadata_list) == 0:
                         updated_seq_group_without_bonus_token  = \
                             MultiStepWorker._copy_seq_metadata_excluding_last_token(
@@ -198,10 +196,6 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             updated_seq_group_metadata_list.append(
                 MultiStepWorker._shallow_copy_seq_group_metadata(seq_group))
             # Record the index of the original sequence group.
-            print (f"** total expand len: {len(updated_seq_group_metadata_list)}")
-            for i in updated_seq_group_metadata_list:
-                for j in i.seq_data.keys(): 
-                    print (f"** num_computed_tokens: {i.seq_data[j]._num_computed_tokens}")
             
             indices_of_original_sequence_groups.append(
                 len(updated_seq_group_metadata_list) - 1)
@@ -214,7 +208,6 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             updated_execute_model_req.previous_hidden_states\
                 .expand_with_bonus_tokens(seq_with_bonus_token_in_last_step)
             
-            print (f"** previous_hidden_states shape {updated_execute_model_req.previous_hidden_states.hidden_states.shape}")
         return updated_execute_model_req, indices_of_original_sequence_groups
 
     @staticmethod
