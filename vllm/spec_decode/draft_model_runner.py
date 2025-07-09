@@ -417,25 +417,26 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 pass  ## prefill阶段无改造
             elif kwargs.get("is_prompt") is False:
                 activate_ids = logits_part2[-1].argmax(-1).item()
-                if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1:
+                if activate_ids < self.PAD_EXPAND_VOCAB_SIZE - self.PAD_ORIGIN_VOCAB_SIZE - 1 and activate_ids <= len(self.src_ids):
                     replace_token_ids = self.src_ids[activate_ids]
-                    replace_token_ids = replace_token_ids.masked_select(replace_token_ids != -1)
-                    if debug_advance_input:
-                        print (f"** Step: {step}, Enter Special token ids:{activate_ids}  replace with: {replace_token_ids}"  )
-                    for i in range(replace_token_ids.shape[0]):
-                        if i == 0:
-                            output.sampled_token_ids[bonus_seq_idx][0] = replace_token_ids[0]
-                            #model_input = self._gpu_advance_step(model_input, outputs[-1])
-                            output_special = copy.deepcopy(output)
-                            output_special.logprobs.fill_(-1)
-                            output_special.sampled_token_probs.fill_(-1)
-                        else:
-                            output_special.sampled_token_ids = torch.cat([output_special.sampled_token_ids[1:], replace_token_ids[i].reshape(1, 1)], dim=0)
-                            outputs.append(output_special)
-                            if i < replace_token_ids.shape[0] - 1:
-                                output_special = copy.deepcopy(output_special)
+                    if output.sampled_token_ids[bonus_seq_idx][0] == replace_token_ids[0]: #只有被sampled且被激活的才会触发特殊词
+                        replace_token_ids = replace_token_ids.masked_select(replace_token_ids != -1)
+                        if debug_advance_input:
+                            print (f"** Step: {step}, Enter Special token ids:{activate_ids}  replace with: {replace_token_ids}"  )
+                        for i in range(replace_token_ids.shape[0]):
+                            if i == 0:
+                                #output.sampled_token_ids[bonus_seq_idx][0] = replace_token_ids[0]
                                 #model_input = self._gpu_advance_step(model_input, outputs[-1])
-                    return outputs    ## 早停
+                                output_special = copy.deepcopy(output)
+                                output_special.logprobs.fill_(-1)
+                                output_special.sampled_token_probs.fill_(-1)
+                            else:
+                                output_special.sampled_token_ids = torch.cat([output_special.sampled_token_ids[1:], replace_token_ids[i].reshape(1, 1)], dim=0)
+                                outputs.append(output_special)
+                                if i < replace_token_ids.shape[0] - 1:
+                                    output_special = copy.deepcopy(output_special)
+                                    #model_input = self._gpu_advance_step(model_input, outputs[-1])
+                        return outputs    ## 早停
 
             # Prepare inputs for the next step
             if step != num_steps - 1:
