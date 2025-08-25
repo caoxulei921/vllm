@@ -400,6 +400,7 @@ class ShareGPTDataset(BenchmarkDataset):
                 entry["conversations"][0]["value"],
                 entry["conversations"][1]["value"],
             )
+            prompt = '<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n'+prompt+'<|im_end|>\n<|im_start|>assistant\n'
 
             lora_request, tokenizer = self.get_random_lora_request(
                 tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path)

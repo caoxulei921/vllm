@@ -1038,6 +1038,13 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument(
+            "--speculative-append-slots-len", "--speculative_append_slots_len",
+            type=int,
+            default=0,
+            help="Used in eagle with different vocab_size, set it to the maximum special word length -1."
+        )
+
         return parser
 
     @classmethod

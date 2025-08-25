@@ -866,9 +866,48 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             self.proposer_worker.execute_model(prefill_req)
 
         with Timer() as verification_timer:
-            accepted_token_ids, target_logprobs, self.special_pos_idx = self._verify_tokens(
-                execute_model_req.seq_group_metadata_list, proposal_scores,
-                proposals, execute_model_req.num_lookahead_slots)
+            # accepted_token_ids, target_logprobs, self.special_pos_idx = self._verify_tokens(
+            #     execute_model_req.seq_group_metadata_list, proposal_scores,
+            #     proposals, execute_model_req.num_lookahead_slots)
+
+            mask = (proposal_scores.token_ids[..., :-1] == proposals.proposal_token_ids)
+            mask = torch.cat((mask, torch.zeros(mask.shape[0],1).bool().to(mask.device)), dim=-1)
+            for i in range(len(mask)):
+                false_idx = torch.where(~mask[i])[0]
+                if len(false_idx) > 0:
+                    first_false = false_idx[0].item()
+                    mask[i, first_false] = True
+                    mask[i, first_false+1:] = False
+                    if first_false == mask.shape[-1] - 1:
+                        mask[i, -1] = True
+            accepted_token_ids = torch.where(mask, proposal_scores.token_ids, -1)
+            target_logprobs = proposal_scores.logprobs
+            hidden_states = proposal_scores.hidden_states
+            if hidden_states is not None:
+                # Only get terminal hidden states for next step
+                terminal_metadata = [
+                    sg for sg in execute_model_req.seq_group_metadata_list if sg.do_sample
+                ]
+
+                # Contract hidden states based on accepted tokens
+                hs_size = hidden_states.shape[-1]
+                accepted_index = accepted_token_ids + 1  # Convert -1 to 0
+                accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)  # b
+                # Drop non-terminal prefill chunks hidden states.
+                hidden_states = hidden_states[accepted_index !=
+                                            VLLM_INVALID_TOKEN_ID]
+                accepted_index = accepted_index[accepted_index !=
+                                                VLLM_INVALID_TOKEN_ID]
+                assert len(accepted_index) == hidden_states.shape[0] == len(
+                    terminal_metadata)
+                index = accepted_index[:, None, None].expand(-1, 1,
+                                                            hs_size)  # b x 1 x d
+                second_last_token_hidden_states = hidden_states[:, -2]  # b x d
+                hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
+                # Store hidden states from target model for subsequent decode step
+                self.previous_hidden_states = HiddenStates(
+                    hidden_states, terminal_metadata,
+                    second_last_token_hidden_states)
 
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,

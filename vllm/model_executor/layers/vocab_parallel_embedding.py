@@ -380,11 +380,12 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                        param.packed_factor)
             start_idx = start_idx // packed_factor
             shard_size = shard_size // packed_factor
-        # else:
-        #     assert loaded_weight.shape[output_dim] == self.org_vocab_size
+        else:
+            assert loaded_weight.shape[output_dim] <= self.org_vocab_size
 
         # Copy the data. Select chunk corresponding to current shard.
-        loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+        if shard_size <= loaded_weight.shape[output_dim]:
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
 
         if current_platform.is_hpu():
             # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
